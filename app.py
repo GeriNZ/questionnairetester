@@ -5,21 +5,48 @@ from openai import OpenAI
 from docx import Document
 import fitz  # PyMuPDF
 import matplotlib.pyplot as plt
+import re
 
 # Initialize the OpenAI client using an environment variable for the API key
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def extract_questions_from_docx(file):
     document = Document(file)
-    questions = [p.text for p in document.paragraphs if p.text.strip()]
-    return questions
+    text = "\n".join([p.text for p in document.paragraphs if p.text.strip()])
+    return extract_questions(text)
 
 def extract_questions_from_pdf(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
-    questions = []
+    text = ""
     for page_num in range(doc.page_count):
         page_text = doc.load_page(page_num).get_text()
-        questions.extend([line for line in page_text.splitlines() if line.strip()])
+        text += page_text
+    return extract_questions(text)
+
+def extract_questions(text):
+    # Split the text into sentences based on common punctuation
+    sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?)\s', text)
+    
+    # Combine follow-up questions with their preceding questions
+    questions = []
+    current_question = ""
+
+    for sentence in sentences:
+        clean_sentence = sentence.strip()
+
+        # If it's a continuation like "If yes, how?", merge it with the current question
+        if re.match(r'^(if yes,|why or why not|if so,|how|why|explain)$', clean_sentence.lower()):
+            if current_question:
+                current_question += " " + clean_sentence
+        # If it's a new question, add the previous question (if any) to the list
+        elif clean_sentence.endswith('?'):
+            if current_question:
+                questions.append(current_question.strip())
+            current_question = clean_sentence
+        # Add any remaining question after the loop ends
+    if current_question:
+        questions.append(current_question.strip())
+
     return questions
 
 def assess_questions(questions):
@@ -28,21 +55,17 @@ def assess_questions(questions):
         # Use ChatCompletion to assess each question
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are an expert in questionnaire assessment, able to identify issues and provide suggestions for better phrasing."},
-                {"role": "user", "content": f"Evaluate the following question: '{question}'. Describe any potential misinterpretations or alternative readings, and suggest improvements if needed."}
+                {"role": "system", "content": "You are an expert in questionnaire design. Your role is to critically evaluate whether the question is well-formulated or if it needs improvement. Be very rigorous and identify any potential issues, including bias, ambiguity, or leading language. You should not be overly critically though as this is for master level student projects."},
+                {"role": "user", "content": f"Question: '{question}'\n\nPlease classify this question as either 'Well Formulated' or 'Needs Improvement'. If it needs improvement, describe in detail what is wrong and suggest an improvement."}
             ],
             model="gpt-3.5-turbo",
         )
 
         # Correctly extract the content from the response
-        response_message = response.choices[0].message.content
-        results.append(response_message.strip())
+        response_message = response.choices[0].message.content.strip()
+        results.append(response_message)
 
     return results
-
-
-
-
 
 st.title("Questionnaire Quality Assessment Tool")
 
@@ -65,7 +88,7 @@ if uploaded_file is not None:
             well_formulated = 0
             needs_work = 0
             for assessment in assessments:
-                if "no issues" in assessment.lower():
+                if "Well Formulated" in assessment:
                     well_formulated += 1
                 else:
                     needs_work += 1
